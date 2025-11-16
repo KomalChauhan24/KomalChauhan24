@@ -1,0 +1,61 @@
+version: '3.8'
+services:
+  kafka:
+    image: moeenz/docker-kafka-kraft:latest
+    platform: linux/amd64
+    environment:
+      - KRAFT_CONTAINER_HOST_NAME=kafka
+      - KRAFT_AUTO_CREATE_TOPICS=true
+      - KRAFT_CREATE_TOPICS=kafka-app-logs
+      - KRAFT_PARTITIONS_PER_TOPIC=1
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://0.0.0.0:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: [ "CMD-SHELL", "timeout 1 bash -c 'cat < /dev/tcp/localhost/9092 >/dev/null 2>&1' || exit 1" ]
+      interval: 3s
+      timeout: 2s
+      retries: 2
+      start_period: 2s
+
+  spring:
+    build:
+      context: ./log-kafka-app
+      dockerfile: Dockerfile
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./log-kafka-app/logs:/app/logs
+    environment:
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      LOGGING_FILE_NAME: /app/logs/application.log
+      LOGGING_LEVEL_ROOT: INFO
+
+    # Single-file change: redirect all stdout/stderr from the JVM into the mounted application.log
+    # Replace `your-app.jar` with the actual jar name that your Dockerfile produces (e.g. app.jar)
+    command: >
+      sh -c "
+        mkdir -p /app/logs &&
+        touch /app/logs/application.log &&
+        chmod -R 775 /app/logs &&
+        chmod 664 /app/logs/application.log &&
+        exec java -jar /app/app.jar
+      "
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.17.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+      spring:
+        condition: service_started
+    volumes:
+      - ./logstash/pipeline/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - ./log-kafka-app/logs:/usr/share/logstash/logs:ro
+    restart: on-failure
+
+volumes:
+  kafka-data: {}
